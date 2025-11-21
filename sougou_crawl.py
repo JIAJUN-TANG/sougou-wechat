@@ -256,13 +256,13 @@ class WeChatCrawler:
                 time.sleep(random.uniform(2, 4))  # 随机延迟
                 
                 response = self.anti_crawler_session.get(url, params=params, timeout=15)
+                
             else:
                 # 访问首页建立会话
                 requests.get("https://weixin.sogou.com/", headers=enhanced_headers, timeout=10)
                 time.sleep(random.uniform(2, 4))  # 随机延迟
                 
                 response = requests.get(url, headers=enhanced_headers, params=params, timeout=15)
-            
             
             # 获取cookies 更新到 headers（仅在不使用防反爬系统时）
             if not self.use_anti_crawler and response.cookies:
@@ -274,7 +274,7 @@ class WeChatCrawler:
             
             # 如果指定了时间范围，进行过滤
             if start_time or end_time:
-                articles = self._filter_articles_by_time(articles, start_time, end_time)
+                pass
             
             self.logger.info(f"搜索 '{query}' 第{page}页，找到 {len(articles)} 篇文章")
             return articles
@@ -343,7 +343,8 @@ class WeChatCrawler:
                 if timestamp_match:
                     timestamp = int(timestamp_match.group(1))
                     article.publish_time = datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
-        
+            articles.append(article)
+            
         return articles
     
     def get_real_urls_batch(self, articles: List[WeChatArticle], max_workers: int = 3) -> List[WeChatArticle]:
