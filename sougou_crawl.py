@@ -1,8 +1,7 @@
 import requests
 from bs4 import BeautifulSoup
 import re
-from datetime import datetime, timedelta
-import json
+from datetime import datetime
 import os
 import time
 import random
@@ -10,6 +9,10 @@ from typing import List, Dict, Optional
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor
 import logging
+import json
+from playwright.sync_api import sync_playwright, Playwright, Browser
+import pickle
+
 from sqlite_storage import SQLiteArticleStorage
 from anti_crawler import create_anti_crawler_session
 
@@ -32,7 +35,8 @@ class WeChatArticle:
 class WeChatCrawler:
     """微信公众号爬虫类 - 封装用于FastAPI集成"""
     
-    def __init__(self, config_file: str = "wechat_accounts.txt", use_anti_crawler: bool = True):
+    def __init__(self, config_file: str = "wechat_accounts.txt", use_anti_crawler: bool = True, 
+                 login_cookie_path: str = "login_cookies.pkl", keyword: str = "老年机器人"):
         # 设置日志
         logging.basicConfig(
             level=logging.INFO,
@@ -43,6 +47,16 @@ class WeChatCrawler:
             ]
         )
         self.logger = logging.getLogger(__name__)
+        
+        # 登录相关配置
+        self.login_cookie_path = login_cookie_path
+        self.is_logged_in = False
+        self.login_session = requests.Session()
+        self.keyword = keyword
+        
+        # Playwright相关
+        self.playwright: Optional[Playwright] = None
+        self.browser: Optional[Browser] = None
         
         # 初始化防反爬系统
         self.use_anti_crawler = use_anti_crawler
@@ -58,6 +72,9 @@ class WeChatCrawler:
             "sec-ch-ua-platform": '"Windows"',
         }
         
+        # 更新登录session的headers
+        self.login_session.headers.update(self.headers)
+        
         if self.use_anti_crawler:
             self.anti_crawler_session = create_anti_crawler_session(use_proxy=False, max_retries=3)
             self.logger.info("防反爬系统初始化完成")
@@ -71,33 +88,182 @@ class WeChatCrawler:
         # 配置文件路径
         self.config_file = config_file
         
-        
-    def load_wechat_accounts(self) -> List[str]:
-        """从配置文件加载微信公众号列表"""
-        accounts = []
+        # 尝试加载已保存的登录cookie
+        self.load_login_cookies()
+    
+    def init_playwright(self):
+        """初始化Playwright浏览器"""
+        if not self.playwright:
+            self.playwright = sync_playwright().start()
+            self.browser = self.playwright.chromium.launch(headless=False)  # 显示浏览器界面
+            self.logger.info("Playwright浏览器已启动")
+    
+    def close_playwright(self):
+        """关闭Playwright浏览器"""
+        if self.browser:
+            self.browser.close()
+        if self.playwright:
+            self.playwright.stop()
+        self.logger.info("Playwright浏览器已关闭")
+    
+    def load_login_cookies(self):
+        """加载保存的登录cookies"""
         try:
-            if not os.path.exists(self.config_file):
-                self.logger.warning(f"配置文件 {self.config_file} 不存在，使用默认配置")
-                return []
-            
-            with open(self.config_file, 'r', encoding='utf-8') as f:
-                for line_num, line in enumerate(f, 1):
-                    line = line.strip()
-                    # 跳过空行和注释行
-                    if line and not line.startswith('#'):
-                        accounts.append(line)
-                        
-            if accounts:
-                self.logger.info(f"从配置文件加载了 {len(accounts)} 个公众号: {accounts}")
-            else:
-                self.logger.warning("配置文件为空，使用默认配置")
-                accounts = []
-                
+            if os.path.exists(self.login_cookie_path):
+                with open(self.login_cookie_path, 'rb') as f:
+                    cookies = pickle.load(f)
+                    # 加载到requests session
+                    for cookie in cookies:
+                        self.login_session.cookies.set(cookie['name'], cookie['value'], 
+                                                     domain=cookie.get('domain', '.sogou.com'),
+                                                     path=cookie.get('path', '/'))
+                    self.is_logged_in = True
+                    self.logger.info("成功加载已保存的登录状态")
+                    
+                    # 将cookies同步到防反爬session
+                    if self.use_anti_crawler:
+                        for cookie in cookies:
+                            self.anti_crawler_session.session.cookies.set(cookie['name'], cookie['value'],
+                                                                domain=cookie.get('domain', '.sogou.com'),
+                                                                path=cookie.get('path', '/'))
         except Exception as e:
-            self.logger.error(f"读取配置文件失败: {e}，使用默认配置")
-            accounts = []
+            self.logger.warning(f"加载登录cookies失败: {e}")
+            self.is_logged_in = False
+    
+    def save_login_cookies(self, cookies):
+        """保存登录cookies到文件"""
+        try:
+            with open(self.login_cookie_path, 'wb') as f:
+                pickle.dump(cookies, f)
             
-        return accounts
+            # 同时加载到requests session
+            for cookie in cookies:
+                self.login_session.cookies.set(cookie['name'], cookie['value'], 
+                                             domain=cookie.get('domain', '.sogou.com'),
+                                             path=cookie.get('path', '/'))
+            
+            self.logger.info("登录状态已保存")
+            self.is_logged_in = True
+        except Exception as e:
+            self.logger.error(f"保存登录cookies失败: {e}")
+    
+    def playwright_login(self):
+        """使用Playwright进行浏览器自动化登录"""
+        self.init_playwright()
+        
+        try:
+            # 创建新页面
+            page = self.browser.new_page()
+            page.set_extra_http_headers(self.headers)
+            
+            # 导航到搜狗微信首页
+            self.logger.info("正在打开搜狗微信页面...")
+            page.goto("https://weixin.sogou.com/", wait_until="networkidle")
+            
+            # 输入关键词并搜索
+            self.logger.info(f"输入搜索关键词: {self.keyword}")
+            search_box = page.locator('input[name="query"]')
+            search_box.wait_for()
+            search_box.fill(self.keyword)
+            
+            # 点击搜索按钮
+            search_button = page.locator('input[type="submit"]')
+            search_button.click()
+            page.wait_for_load_state("networkidle")
+            
+            
+            login_button = page.locator("//a[@id='top_login']")
+            
+            if login_button:
+                self.logger.info("找到登录按钮，点击登录...")
+                login_button.click()
+                page.wait_for_load_state("networkidle")
+            else:
+                logging.error("未找到登录按钮")
+            
+            # 等待二维码元素出现
+            qrcode_locators = [
+                page.locator('img.qrcode-img'),
+                page.locator('img[alt="二维码"]'),
+                page.locator('//div[contains(@class, "qrcode")]/img'),
+                page.locator('//img[contains(@src, "qrcode")]')
+            ]
+            
+            qrcode_found = False
+            for qr_locator in qrcode_locators:
+                try:
+                    qr_locator.wait_for(timeout=5000)
+                    qrcode_found = True
+                    self.logger.info("请使用微信扫描页面上的二维码进行登录...")
+                    break
+                except:
+                    continue
+            
+            if not qrcode_found:
+                self.logger.info("未找到二维码图片，可能需要手动触发登录")
+            
+            # 等待用户完成登录
+            self.logger.info("请在60秒内完成扫码登录...")
+            login_success = False
+            
+            # 检查登录状态的循环
+            for i in range(60):
+                # 检查是否已登录
+                cookies = page.context.cookies()
+                login_cookies = [c for c in cookies if any(key in c['name'].lower() for key in ['suid', 'sct', 'ssuid', 'login'])]
+                
+                if login_cookies:
+                    login_success = True
+                    break
+                
+                # 检查页面是否显示已登录状态
+                try:
+                    if not login_button.is_visible():
+                        login_success = True
+                        break
+                except:
+                    pass
+                
+                time.sleep(1)
+            
+            if login_success:
+                self.logger.info("登录成功！正在获取登录Cookie...")
+                # 获取所有cookie
+                all_cookies = page.context.cookies()
+                # 保存cookie
+                self.save_login_cookies(all_cookies)
+                
+                # 同步到防反爬session
+                if self.use_anti_crawler:
+                    for cookie in all_cookies:
+                        self.anti_crawler_session.session.cookies.set(cookie['name'], cookie['value'],
+                                                            domain=cookie.get('domain', '.sogou.com'),
+                                                            path=cookie.get('path', '/'))
+                
+                self.logger.info("Cookie已成功保存")
+            else:
+                self.logger.error("登录超时或未完成登录")
+                return False
+            
+            # 关闭页面
+            page.close()
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Playwright登录过程出错: {e}")
+            return False
+        finally:
+            # 可以选择保持浏览器打开或关闭
+            # self.close_playwright()
+            pass
+    
+    def login(self, force_login: bool = False):
+        """执行登录流程"""
+        if self.is_logged_in and not force_login:
+            self.logger.info("已处于登录状态")
+            return True
+        
+        return self.playwright_login()
     
     def extract_real_url(self, response_text: str) -> Optional[str]:
         """从搜狗微信重定向页面的JavaScript中提取真实的微信文章URL"""
@@ -111,10 +277,10 @@ class WeChatCrawler:
             return real_url
         
         # 备用方法：直接匹配完整的URL模式
-        full_url_pattern = r'https://mp\.weixin\.qq\.com/s\?[^"\']* '
+        full_url_pattern = r'https://mp\.weixin\.qq\.com/s\?[^"\']*'
         full_match = re.search(full_url_pattern, response_text)
         if full_match:
-            return full_match.group(0)
+            return full_match.group(0).strip()
         
         return None
     
@@ -124,12 +290,11 @@ class WeChatCrawler:
             if self.use_anti_crawler:
                 response = self.anti_crawler_session.get(sogou_url, timeout=10)
             else:
-                response = requests.get(sogou_url, headers=self.headers, timeout=10)
+                response = self.login_session.get(sogou_url, headers=self.headers, timeout=10)
             
             response.raise_for_status()
             real_url = self.extract_real_url(response.text)
             if real_url:
-                self.logger.info(f"成功提取真实URL: {real_url[:100]}...")
                 return real_url
             else:
                 self.logger.warning(f"未能提取到真实URL: {sogou_url[:100]}...")
@@ -167,18 +332,15 @@ class WeChatCrawler:
         
         # 如果没有找到特定的内容区域，使用body标签
         if not content_text:
-            body = soup.find('body')
+            body = soup.find("body")
             if body:
                 content_text = body.get_text(separator='\n', strip=True)
         
         # 清理文本：移除多余的空行和空格
         lines = [line.strip() for line in content_text.split('\n') if line.strip()]
-        clean_content = '\n'.join(lines)
+        clean_content = "\n".join(lines)
         
-        address_selector = "#js_ip_wording"
-        address_elem = soup.select_one(address_selector)
-        if address_elem:
-            address_text = address_elem.get_text(strip=True)
+        address_text = ""
 
         return clean_content, address_text
     
@@ -195,7 +357,7 @@ class WeChatCrawler:
                     "Referer": "https://weixin.sogou.com/",
                     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
                 })
-                response = requests.get(real_url, headers=wechat_headers, timeout=15)
+                response = self.login_session.get(real_url, headers=wechat_headers, timeout=15)
             
             response.raise_for_status()
             
@@ -222,6 +384,33 @@ class WeChatCrawler:
                 "address": "",
                 "success": False
             }
+    
+    def load_wechat_accounts(self) -> List[str]:
+        """从配置文件加载微信公众号列表"""
+        accounts = []
+        try:
+            if not os.path.exists(self.config_file):
+                self.logger.warning(f"配置文件 {self.config_file} 不存在，使用默认配置")
+                return []
+            
+            with open(self.config_file, 'r', encoding='utf-8') as f:
+                for line_num, line in enumerate(f, 1):
+                    line = line.strip()
+                    # 跳过空行和注释行
+                    if line and not line.startswith('#'):
+                        accounts.append(line)
+                        
+            if accounts:
+                self.logger.info(f"从配置文件加载了 {len(accounts)} 个公众号: {accounts}")
+            else:
+                self.logger.warning("配置文件为空，使用默认配置")
+                accounts = []
+                
+        except Exception as e:
+            self.logger.error(f"读取配置文件失败: {e}，使用默认配置")
+            accounts = []
+            
+        return accounts
     
     def search_articles(self, query: str, page: int = 1, start_time: Optional[datetime] = None, end_time: Optional[datetime] = None) -> List[WeChatArticle]:
         """搜索微信文章"""
@@ -259,21 +448,18 @@ class WeChatCrawler:
                 
             else:
                 # 访问首页建立会话
-                requests.get("https://weixin.sogou.com/", headers=enhanced_headers, timeout=10)
+                self.login_session.get("https://weixin.sogou.com/", headers=enhanced_headers, timeout=10)
                 time.sleep(random.uniform(2, 4))  # 随机延迟
                 
-                response = requests.get(url, headers=enhanced_headers, params=params, timeout=15)
+                response = self.login_session.get(url, headers=enhanced_headers, params=params, timeout=15)
             
-            # 获取cookies 更新到 headers（仅在不使用防反爬系统时）
-            if not self.use_anti_crawler and response.cookies:
-                cookies_str = '; '.join([f"{key}={value}" for key, value in response.cookies.items()])
-                self.headers['Cookie'] = cookies_str
             response.raise_for_status()
             
             articles = self._parse_search_results(response.text, query)
             
             # 如果指定了时间范围，进行过滤
             if start_time or end_time:
+                # 这里可以添加时间过滤逻辑
                 pass
             
             self.logger.info(f"搜索 '{query}' 第{page}页，找到 {len(articles)} 篇文章")
@@ -344,7 +530,7 @@ class WeChatCrawler:
                     timestamp = int(timestamp_match.group(1))
                     article.publish_time = datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
             articles.append(article)
-            
+
         return articles
     
     def get_real_urls_batch(self, articles: List[WeChatArticle], max_workers: int = 3) -> List[WeChatArticle]:
@@ -360,9 +546,7 @@ class WeChatCrawler:
                 # 添加延时避免请求过快
                 time.sleep(1)
             return article
-        
-        self.logger.info(f"开始批量获取 {len(articles)} 篇文章的真实URL...")
-        
+                
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             processed_articles = list(executor.map(process_article, articles))
         
@@ -374,7 +558,7 @@ class WeChatCrawler:
     def save_article_to_storage(self, article: WeChatArticle) -> bool:
         """保存文章到SQLite数据库"""
         try:
-            # 转换为字典格式以兼容MinIO存储
+            # 转换为字典格式
             article_dict = {
                 "title": article.title,
                 "summary": article.summary,
@@ -395,7 +579,6 @@ class WeChatCrawler:
             if success:
                 return True
             else:
-                self.logger.warning(f"文章可能重复，未保存: {article.title[:30]}...")
                 return False
             
         except Exception as e:
@@ -450,6 +633,17 @@ class WeChatCrawler:
         try:
             start_time_exec = time.time()
         
+            # 确保已登录
+            if not self.is_logged_in:
+                self.logger.warning("尚未登录，尝试登录...")
+                if not self.login():
+                    return {
+                        "success": False,
+                        "message": "登录失败，无法继续爬取",
+                        "data": [],
+                        "stats": {"total": 0, "real_urls_extracted": 0, "content_fetched": 0, "duration": 0}
+                    }
+        
             # 1. 搜索文章
             articles = self.search_articles(query, page, start_time, end_time)
         
@@ -471,80 +665,108 @@ class WeChatCrawler:
         
             # 4. 统计结果
             total_articles = len(articles)
-            successful_extractions = sum(1 for article in articles if article.success)
+            real_urls_extracted = sum(1 for article in articles if article.success)
             content_fetched_count = sum(1 for article in articles if article.content_fetched)
             duration = time.time() - start_time_exec
         
             return {
-            "success": True,
-            "message": f"成功爬取 {total_articles} 篇文章" + (f"，获取 {content_fetched_count} 篇完整内容" if fetch_content else ""),
-            "stats": {
-                "total": total_articles,
-                "real_urls_extracted": successful_extractions,
-                "content_fetched": content_fetched_count,
-                "duration": round(duration, 2),
-                "query": query,
-                "page": page
+                "success": True,
+                "message": f"成功爬取 {total_articles} 篇文章" + (f"，获取 {content_fetched_count} 篇完整内容" if fetch_content else ""),
+                "data": articles,
+                "stats": {
+                    "total": total_articles,
+                    "real_urls_extracted": real_urls_extracted,
+                    "content_fetched": content_fetched_count,
+                    "duration": round(duration, 2)
+                }
             }
-        }
 
         except Exception as e:
+            self.logger.error(f"爬取过程中发生错误: {e}")
             return {
                 "success": False,
-                "message": e,
+                "message": str(e),
+                "data": [],
                 "stats": {"total": 0, "real_urls_extracted": 0, "content_fetched": 0, "duration": 0}
             }
     
-    def crawl_all_configured_accounts(
-        self,
+    def crawl_all_configured_accounts(self,
         get_real_urls: bool = True,
         fetch_content: bool = False,
+        page: Optional[int] = None,
         start_time: Optional[datetime] = None,
         end_time: Optional[datetime] = None
     ) -> Dict:
         """
         爬取所有配置文件中的公众号
         """
+        # 确保已登录
+        if not self.is_logged_in:
+            self.logger.warning("尚未登录，尝试登录...")
+            if not self.login():
+                return {
+                    "success": False,
+                    "message": "登录失败，无法继续爬取",
+                    "data": []
+                }
+        
         accounts = self.load_wechat_accounts()
         
         if not accounts:
             return {
                 "success": False,
                 "message": "没有配置任何公众号",
-                "data": [],
-                "stats": {"queries": 0, "total_found": 0}
+                "data": []
             }
-                
-        all_articles = []
-        total_articles = 0
+        
+        all_results = []
         
         for i, account in enumerate(accounts, 1):
             self.logger.info(f"[{i}/{len(accounts)}] 正在爬取公众号：{account}")
             
-            try:
-                result = self.crawl_and_extract(
+            if page is None:
+                page = 3000
+            for p in range(12, page):
+                try:
+                    result = self.crawl_and_extract(
                     query=account,
-                    page=1,
+                    page=p, 
                     get_real_urls=get_real_urls,
                     fetch_content=fetch_content,
                     start_time=start_time,
                     end_time=end_time
                 )
                 
-                if result['success']:
-                    all_articles.extend(result['data'])
-                    total_articles += len(result['data'])
-                    self.logger.info(f"公众号 '{account}' 爬取成功：{len(result['data'])} 篇文章")
-                else:
-                    self.logger.error(f"公众号 '{account}' 爬取失败：{result.get('message', '未知错误')}")
+                    all_results.append({
+                    "account": account,
+                    "result": result
+                })
                 
-                # 添加延迟避免请求过快
-                if i < len(accounts):
-                    time.sleep(2)
+                    if result['success']:
+                        self.logger.info(f"公众号 '{account}' 第{p}页爬取成功：{result['message']}")
+                    else:
+                        self.logger.error(f"公众号 '{account}' 第{p}页爬取失败：{result.get('message', '未知错误')}")
+                
+                    # 添加延迟避免请求过快
+                    if p < page:
+                        time.sleep(random.uniform(3, 5))
                     
-            except Exception as e:
-                self.logger.error(f"爬取公众号 '{account}' 时发生异常：{e}")
-                continue
+                except Exception as e:
+                    self.logger.error(f"爬取公众号 '{account}' 时发生异常：{e}")
+                    all_results.append({
+                    "account": account,
+                    "result": {
+                        "success": False,
+                        "message": str(e)
+                    }
+                })
+                    continue
+        
+            return {
+            "success": any(item['result']['success'] for item in all_results),
+            "message": f"完成爬取 {len(accounts)} 个公众号",
+            "data": all_results
+        }
     
     def get_anti_crawler_stats(self) -> Dict:
         """获取防反爬系统统计信息"""
@@ -562,14 +784,21 @@ class WeChatCrawler:
 
 def main():
     """主函数"""
-     
-    # 创建爬虫实例
-    crawler = WeChatCrawler()
+    # 创建爬虫实例，指定搜索关键词
+    crawler = WeChatCrawler(keyword="老年机器人")
+    
+    # 确保登录
+    if not crawler.is_logged_in:
+        crawler.login()
     
     # 从配置文件加载公众号列表
     crawler.load_wechat_accounts()
     
-    crawler.crawl_all_configured_accounts(get_real_urls=True, fetch_content=True)
+    # 执行爬取
+    crawler.crawl_all_configured_accounts(get_real_urls=True, fetch_content=True, page=None)
+    
+    # 关闭Playwright浏览器
+    crawler.close_playwright()
 
 
 if __name__ == "__main__":
