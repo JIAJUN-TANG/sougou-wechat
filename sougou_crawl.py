@@ -171,6 +171,8 @@ class WeChatCrawler:
             search_button.click()
             page.wait_for_load_state("networkidle")
             
+            all_counts = page.locator('//div[@class="mun"]').text_content()
+            self.logger.info(f"搜索结果总数: {all_counts}")
             
             login_button = page.locator("//a[@id='top_login']")
             
@@ -738,7 +740,7 @@ class WeChatCrawler:
             
             if page is None:
                 page = 3000
-            for p in range(29, page):
+            for p in range(61, page):
                 try:
                     result = self.crawl_and_extract(
                     query=account,

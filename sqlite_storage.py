@@ -77,7 +77,8 @@ class SQLiteArticleStorage:
                 content TEXT,
                 saved_at TEXT NOT NULL,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                keyword TEXT
             )
             """
             
@@ -130,8 +131,8 @@ class SQLiteArticleStorage:
             # 构建插入SQL
             insert_sql = """
             INSERT OR IGNORE INTO articles 
-            (object_key, title, summary, source, publish_time, address, real_url, content, saved_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (object_key, title, summary, source, publish_time, address, real_url, content, saved_at, keyword)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
             
             with self.get_connection() as conn:
@@ -145,7 +146,8 @@ class SQLiteArticleStorage:
                     article_data.get('address', ''),
                     article_data.get('real_url', ''),
                     article_data.get('content', ''),
-                    article_data['saved_at']
+                    article_data['saved_at'],
+                    article_data.get('keyword', '')
                 ))
                 
                 # 检查是否插入成功（0表示已存在）
@@ -183,3 +185,4 @@ class SQLiteArticleStorageAdapter(SQLiteArticleStorage):
             if self.save_article(article):
                 saved_count += 1
         return saved_count
+
