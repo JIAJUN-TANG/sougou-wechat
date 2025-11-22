@@ -572,7 +572,8 @@ class WeChatCrawler:
                 "content": article.content,
                 "crawl_time": article.crawl_time,
                 "success": article.success,
-                "content_fetched": article.content_fetched
+                "content_fetched": article.content_fetched,
+                "keyword": self.keyword  # 添加keyword字段
             }
             
             # 使用SQLite存储保存单篇文章
@@ -740,7 +741,7 @@ class WeChatCrawler:
             
             if page is None:
                 page = 3000
-            for p in range(61, page):
+            for p in range(63, page):
                 try:
                     result = self.crawl_and_extract(
                     query=account,
