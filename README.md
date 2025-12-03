@@ -6,10 +6,10 @@
 
 - ✅ **自动登录**：使用Playwright自动化登录，支持二维码扫描登录
 - ✅ **防反爬机制**：集成防反爬系统，支持代理和请求重试
-- ✅ **批量爬取**：支持同时爬取多个公众号文章
+- ✅ **批量爬取**：支持同时爬取多个检索词的文章
 - ✅ **数据存储**：使用SQLite数据库持久化存储文章数据
 - ✅ **完整内容获取**：支持获取文章正文内容
-- ✅ **可配置**：通过配置文件管理要爬取的公众号列表
+- ✅ **可配置**：通过配置文件管理要爬取的检索词列表
 - ✅ **多线程处理**：使用多线程提高爬取效率
 - ✅ **日志记录**：详细的日志记录，便于调试和监控
 
@@ -45,9 +45,9 @@ playwright install
 
 ## 配置说明
 
-### 1. 公众号配置文件
+### 1. 检索词配置文件
 
-在项目根目录下创建或编辑 `wechat_accounts.txt` 文件，每行添加一个要爬取的公众号名称或关键词，例如：
+在项目根目录下创建或编辑 `wechat_accounts.txt` 文件，每行添加一个要爬取的关键词，例如：
 
 ```
 老年机器人
@@ -58,8 +58,8 @@ playwright install
 ### 2. 配置说明
 
 - 空行和以 `#` 开头的行将被忽略
-- 支持同时配置多个公众号
-- 爬虫会依次爬取配置文件中的所有公众号
+- 支持同时配置多个检索词
+- 爬虫会依次爬取配置文件中的所有检索词
 
 ## 使用方法
 
@@ -75,7 +75,7 @@ python sougou_crawl.py
 - 启动Playwright浏览器
 - 显示登录二维码
 - 使用微信扫描二维码登录
-- 从配置文件加载公众号列表
+- 从配置文件加载检索词列表
 - 开始爬取文章数据
 - 将数据保存到SQLite数据库
 
@@ -96,7 +96,7 @@ def main():
     if not crawler.is_logged_in:
         crawler.login()
     
-    # 从配置文件加载公众号列表
+    # 从配置文件加载检索词列表
     crawler.load_wechat_accounts()
     
     # 执行爬取
@@ -116,7 +116,7 @@ def main():
 crawler = WeChatCrawler()
 crawler.login()
 result = crawler.crawl_and_extract(
-    query="老年机器人",  # 公众号名称或关键词
+    query="机器人",  # 关键词
     page=1,  # 爬取的页码
     get_real_urls=True,  # 是否获取真实URL
     fetch_content=True  # 是否获取文章正文
@@ -130,7 +130,7 @@ Sougou-Wechat/
 ├── sougou_crawl.py          # 主爬虫脚本
 ├── sqlite_storage.py        # SQLite存储模块
 ├── anti_crawler.py          # 防反爬系统模块
-├── wechat_accounts.txt      # 公众号配置文件
+├── wechat_accounts.txt      # 检索词配置文件
 ├── login_cookies.pkl        # 登录cookie文件（自动生成）
 ├── sougou_crawl.log         # 日志文件（自动生成）
 ├── wechat_articles.db       # SQLite数据库文件（自动生成）
@@ -178,7 +178,7 @@ Sougou-Wechat/
    - 若遇到验证码或封禁，请暂停一段时间后再试
 
 3. **性能优化**：
-   - 建议不要同时爬取过多公众号
+   - 建议不要同时爬取过多检索词
    - 可根据网络情况调整线程数
    - 爬取大量数据时会占用较多内存
 
