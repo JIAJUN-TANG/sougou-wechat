@@ -752,11 +752,11 @@ class WeChatCrawler:
             
             if page is None:
                 page = 3000
-            for p in range(70, page):
+            for p in range(67, page):
                 try:
-                    result = self.crawl_and_extract(
+                    result = self.crawl_and_extract( 
                     query=account,
-                    page=p, 
+                    page=p,  
                     get_real_urls=get_real_urls,
                     fetch_content=fetch_content,
                     start_time=start_time,
